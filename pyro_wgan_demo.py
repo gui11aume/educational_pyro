@@ -10,7 +10,7 @@ import torch.distributions.constraints as constraints
 from torch.distributions.beta import Beta
 from torch.distributions.normal import Normal
 
-from gan_demo import *
+from wgan_demo import *
 
 # Turn on internal checks for debugging.
 # Available only from Pyro 1.3.0.
@@ -25,10 +25,6 @@ class GeneratorModel:
 
    def __call__(self, obs, idx):
       nsmpl = obs.shape[0]
-#      one = torch.ones_like(self.genr.ref)
-#      mix = 2 * Bernoulli(.2 * one[0]).sample([nsmpl]) - 1.
-#      mu = torch.ger(mix, one) # Array of +/-1.
-#      sd = one.expand([nsmpl,-1])
       mu = torch.zeros_like(self.genr.ref).expand([nsmpl,-1])
       sd = torch.ones_like(self.genr.ref).expand([nsmpl,-1])
       # Pyro sample referenced "z" (latent variable).
@@ -38,9 +34,8 @@ class GeneratorModel:
          # the shape of satistical events (4), and that we
          # want "nsmpl" independent events.
          z = pyro.sample('z', dist.Normal(mu,sd).to_event(1))
-      # Push forward through the layers.
-      with torch.no_grad():
-         a,b = self.genr.detfwd(z)
+      # Push forward through the layers (and keep the gradient).
+      a,b = self.genr.detfwd(z)
       # Remove unobserved variables.
       ax = a[:,idx]
       bx = b[:,idx]
@@ -57,7 +52,7 @@ class GeneratorGuide:
       zero = torch.zeros_like(self.genr.ref).expand([nsmpl,-1])
       one  = torch.ones_like(self.genr.ref).expand([nsmpl,-1])
       mu = pyro.param('mu', zero)
-      sd = pyro.param('sd', .3 * one, constraint=constraints.positive)
+      sd = pyro.param('sd', one, constraint=constraints.positive)
       # Pyro sample referenced "z" (latent variables).
       # This plate was present in the model.
       with pyro.plate('plate_z', nsmpl):
@@ -73,7 +68,7 @@ if __name__ == "__main__":
       sys.stderr.write("Requires Python 3\n")
 
    genr = Generator()
-   genr.load_state_dict(torch.load('genr-200.tch'))
+   genr.load_state_dict(torch.load('genr-70.tch'))
 
    data = SpliceData('exon_data.txt')
 
@@ -86,21 +81,28 @@ if __name__ == "__main__":
    guide = GeneratorGuide(genr)
 
    # Declare Adam-based Stochastic Variational Inference engine.
-   adam_params = {'lr': 0.0005, 'betas': (0.90, 0.999)}
-   opt = pyro.optim.Adam(adam_params)
-   svi = pyro.infer.SVI(model, guide, opt, loss=pyro.infer.Trace_ELBO())
+   optim = torch.optim.Adam
+   sched = pyro.optim.MultiStepLR({
+      'optimizer': optim,
+      'optim_args': {'lr': 0.05, 'betas': (0.90, 0.999)},
+      'milestones': [5, 920, 980],
+      'gamma': 0.1,
+   })
+   #adam_params = {'lr': 0.005, 'betas': (0.90, 0.999)}
+   #svi = pyro.infer.SVI(model, guide, opt, loss=pyro.infer.Trace_ELBO())
+   svi = pyro.infer.SVI(model, guide, sched, loss=pyro.infer.Trace_ELBO())
    
    X = 35 # Predict variable 35.
    for batch in data.batches(btchsz=256):
       b = batch.shape[0] # Batch size.
       d = batch.shape[1] # Dimension of the observations.
       # Pre-process the data to avoid NaN on 0s and 1.
-      batch = torch.clamp(batch, min=.01, max=.99).to(device)
+      batch = torch.clamp(batch, min=.001, max=.999).to(device)
       # Remove variable to predict.
       idx = torch.tensor(np.delete(np.arange(d), X)).to(device)
       obs = batch[:,idx]
       loss = 0
-      for step in range(2500):
+      for step in range(1000):
          loss += svi.step(obs, idx)
          if (step+1) % 10 == 0:
             print(loss)
@@ -110,10 +112,10 @@ if __name__ == "__main__":
       infsd = pyro.param('sd')
       import pdb; pdb.set_trace()
       # Sample latent variables with approximate posterior.
-      z = Normal(infmu, infsd).sample([100]).view(100*b,-1)
+      z = Normal(infmu, infsd).sample([1000]).view(1000*b,-1)
       # Propagate forward and sample observable 'x'.
       a,b = genr.detfwd(z)
-      xx = Beta(a[:,X:X+1],b[:,X:X+1]).sample().view(100,-1,1)
-      x = xx.sum(dim=0) / 100.
+      xx = Beta(a[:,X:X+1],b[:,X:X+1]).sample().view(1000,-1,1)
+      x = xx.sum(dim=0) / 1000.
       # Compare.
       torch.cat([x, batch[:,X:X+1]], dim=1)
