@@ -4,11 +4,6 @@
 import pyro
 import torch
 
-import pyro.distributions as dist
-
-from pyro.infer import Trace_ELBO, TraceEnum_ELBO, JitTraceEnum_ELBO, SVI
-from pyro.optim import Adam
-
 pyro.enable_validation()
 pyro.set_rng_seed(123)
 
@@ -43,50 +38,66 @@ poisson = (lambda lmbd: torch.distributions.Poisson(lmbd)
    .log_prob(torch.arange(MAXP+1.)).exp())
 
 
-def model(x):
-   # Half-Cauchy prior on the mutation rate.
-   lmbd = pyro.sample('lmbd', dist.HalfCauchy(torch.ones(1)))
+def model(x=None, lmbd=None):
+   nx = x.shape[0] if x is not None else 1
+   if lmbd is None:
+      # Half-Cauchy prior on the mutation rate.
+      lmbd = pyro.sample('lmbd', pyro.distributions.HalfCauchy(torch.ones(1)))
    probs = poisson(lmbd)
-   with pyro.plate('plate_x', x.shape[0]):
+   with pyro.plate('plate_x', nx):
       # Number of mutations.
       z = pyro.sample(
-           name = 'z',
-           fn = dist.Categorical(probs=probs),
-           infer = {'enumerate': 'parallel'}
+            name = 'z',
+            fn = pyro.distributions.Categorical(probs=probs),
+            infer = {'enumerate': 'parallel'}
       )
       # Number of resistant individuals.
       x = pyro.sample(
-           name = 'x',
-           fn = dist.Categorical(DISTR[z,:]),
-           obs = x
+            name = 'x',
+            fn = pyro.distributions.Categorical(DISTR[z,:]),
+            obs = x
       )
+      return z, x
 
 
-def guide(x):
+def guide(*args, **kwargs):
    # Model 'lmbd' as a LogNormal variate.
    a = pyro.param('a', torch.zeros(1))
    b = pyro.param('b', torch.ones(1),
          constraint=torch.distributions.constraints.positive)
-   lmbd = pyro.sample('lmbd', dist.LogNormal(a,b))
+   return pyro.sample('lmbd', pyro.distributions.LogNormal(a,b))
 
 
 # Data from the Luria-Delbruck experiment (resistant individuals).
 obs = torch.tensor([1,0,3,0,0,5,0,5,0,6,107,0,0,0,1,0,0,64,0,35])
 
 
-optimizer = Adam({ 'lr': 0.05 })
-ELBO = JitTraceEnum_ELBO()
-svi = SVI(model, guide, optimizer, ELBO)
+optimizer = pyro.optim.Adam({ 'lr': 0.05 })
+ELBO = pyro.infer.JitTraceEnum_ELBO()
+svi = pyro.infer.SVI(model, guide, optimizer, ELBO)
 
-l = 0
+loss = 0
 for step in range(1, 501):
-   l += svi.step(obs)
+   loss += svi.step(obs)
    if step % 50 == 0:
-      print(float(l))
-      l = 0.
+      print(loss)
+      loss = 0.
 
 print('===')
+print('Sampling mutation rate')
 a = pyro.param('a')
 b = pyro.param('b')
 print(torch.distributions.log_normal.LogNormal(a,b).sample([18]).view(-1))
-print(torch.distributions.log_normal.LogNormal(a,b).sample([1000]).view(-1).mean())
+
+print('===')
+print('Average mutation rate')
+print(torch.distributions.log_normal.LogNormal(a,b).sample([1000]).mean())
+
+@pyro.infer.infer_discrete(first_available_dim=-2, temperature=1)
+def inference_model(x = None):
+   z, x = model(x=x, lmbd=guide())
+   return z
+
+print('===')
+print('Sampling mutations for 107 resistant individuals')
+print(inference_model(107 * torch.ones(100)))
