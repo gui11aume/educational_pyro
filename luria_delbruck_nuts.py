@@ -63,14 +63,6 @@ def model(scale, x=None, lmbd=None):
       return lmbd, z, x
 
 
-def guide(*args, **kwargs):
-   # Model 'lmbd' as a LogNormal variate.
-   a = pyro.param('a', -20.0 * torch.ones(1))
-   b = pyro.param('b',   0.2 * torch.ones(1),
-         constraint=torch.distributions.constraints.positive)
-   return pyro.sample('lmbd', pyro.distributions.LogNormal(a,b))
-
-
 # Data from the Luria-Delbruck experiment.
 # Size of the cultures.
 scale = torch.cat([
@@ -85,67 +77,39 @@ scale = torch.cat([
 ])
 # Resistant individuals.
 x = torch.tensor([
-   10,18,125,10,14,27,3,17,17,                     # Experiment 1
-   29,41,17,20,31,30,7,17,                         # Experiment 10
-   30,10,40,45,183,12,173,23,57,51,                # Experiment 11
-   6,5,10,8,24,13,165,15,6,10,                     # Experiment 15
-   1,0,3,0,0,5,0,5,0,6,107,0,0,0,1,0,0,64,0,35,    # Experiment 16
-   1,0,0,7,0,303,0,0,3,48,1,4,                     # Experiment 17
-   0,0,0,0,8,1,0,1,0,15,0,0,19,0,0,17,11,0,0,      # Experiment 21a
-   38,28,35,107,13                                 # Experiment 21b
+   10,18,125,10,14,27,3,17,17,                      # Experiment 1
+   29,41,17,20,31,30,7,17,                          # Experiment 10
+   30,10,40,45,183,12,173,23,57,51,                 # Experiment 11
+   6,5,10,8,24,13,165,15,6,10,                      # Experiment 15
+   1,0,3,0,0,5,0,5,0,6,107,0,0,0,1,0,0,64,0,35,     # Experiment 16
+   1,0,0,7,0,303,0,0,3,48,1,4,                      # Experiment 17
+   0,0,0,0,8,1,0,1,0,15,0,0,19,0,0,17,11,0,0,       # Experiment 21a
+   38,28,35,107,13                                  # Experiment 21b
 ])
 
 
-optimizer = pyro.optim.Adam({ 'lr': 0.05 })
-ELBO = pyro.infer.JitTraceEnum_ELBO(max_plate_nesting=1)
-svi = pyro.infer.SVI(model, guide, optimizer, ELBO)
+# NUTS kernel with JIT compilation for speed.
+kernel = pyro.infer.mcmc.NUTS(model, adapt_step_size=True, max_plate_nesting=1,
+   init_strategy=pyro.infer.autoguide.initialization.init_to_sample,
+   jit_compile=True, ignore_jit_warnings=True)
+# Run the MCMC with 2 chains (each size 2000 after 300 warm up iterations).
+mcmc = pyro.infer.mcmc.MCMC(kernel, num_samples=2000, warmup_steps=300,
+   num_chains=2)
+# Feed in the experimental data.
+mcmc.run(scale=scale, x=x)
+smpl = mcmc.get_samples()
 
-loss = 0
-for step in range(1, 1001):
-   loss += svi.step(scale, x)
-   if step % 100 == 0:
-      print(loss)
-      loss = 0.
 
 print('===')
 print('Sampling mutation rate')
-a = pyro.param('a')
-b = pyro.param('b')
-print(torch.distributions.log_normal.LogNormal(a,b).sample([18]).view(-1))
+print(smpl['lmbd'].view(-1)[:18])
 
 print('===')
 print('Average mutation rate')
-smpl = torch.distributions.log_normal.LogNormal(a,b).sample([10000]).view(-1)
-print(smpl.mean())
+print(smpl['lmbd'].mean())
 
 print('===')
 print('99% credible interval')
-lo = torch.kthvalue(smpl, 50).values
-hi = torch.kthvalue(smpl, 9951).values
+lo = torch.kthvalue(smpl['lmbd'].view(-1), 20).values
+hi = torch.kthvalue(smpl['lmbd'].view(-1), 3980).values
 print(torch.tensor([lo, hi]))
-
-@pyro.infer.infer_discrete(first_available_dim=-2)
-def inference_model(scale, x=None):
-   return model(scale, x=x, lmbd=guide())
-
-print('===')
-print('Sampling mutations for 125 resistant individuals (Expt 1)')
-mutations = list()
-for _ in range(100):
-   lmbd, z, x = inference_model(torch.tensor([3.4e10]), torch.tensor([125]))
-   mutations.append(z)
-print(torch.stack(mutations))
-
-print('Sampling mutations for 3 resistant individuals (Expt 1)')
-mutations = list()
-for _ in range(100):
-   lmbd, z, x = inference_model(torch.tensor([3.4e10]), torch.tensor([3]))
-   mutations.append(z)
-print(torch.stack(mutations))
-
-print('Sampling mutations for 107 resistant individuals (Expt 16)')
-mutations = list()
-for _ in range(100):
-   lmbd, z, x = inference_model(torch.tensor([5.6e8]), torch.tensor([3]))
-   mutations.append(z)
-print(torch.stack(mutations))
