@@ -4,6 +4,8 @@
 import pyro
 import torch
 
+assert pyro.__version__.startswith('1.4.0')
+
 pyro.enable_validation()
 pyro.set_rng_seed(123)
 
@@ -138,18 +140,14 @@ INFERENCE.
 
 if __name__ == '__main__':
 
-   # Special idiom for multiprocessing.
-   if device == 'cpu':
-      torch.multiprocessing.set_start_method('forkserver', force=True)
-   elif device == 'cuda':
-      torch.multiprocessing.set_start_method('spawn')
-   # NUTS kernel with JIT compilation for speed.
+   # NUTS kernel with JIT compilation (for speed).
    kernel = pyro.infer.mcmc.NUTS(model, adapt_step_size=True,
          max_plate_nesting=2, jit_compile=True, ignore_jit_warnings=True,
          init_strategy=pyro.infer.autoguide.initialization.init_to_sample)
    # Run the MCMC with 2 chains (each size 2000 after 300 warm up iterations).
+   mp_context = 'forkserver' if device == 'cpu' else 'spawn'
    mcmc = pyro.infer.mcmc.MCMC(kernel, num_samples=1000, warmup_steps=300,
-         num_chains=2)
+         num_chains=2, mp_context='forkserver')
    # Feed in the experimental data.
    mcmc.run(scale=scale, x=x, mask=mask)
    smpl_lmbd = mcmc.get_samples().get('lmbd')
